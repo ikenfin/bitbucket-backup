@@ -5,10 +5,8 @@ import os
 import shutil
 import subprocess
 import sys
-from getpass import getpass
 
 import requests
-from requests.auth import HTTPBasicAuth
 
 try:
     from urllib.parse import quote
@@ -100,31 +98,26 @@ def fetch_lfs_content(backup_dir):
 
 
 def get_repositories(
-    username=None, password=None, oauth_key=None, oauth_secret=None, team=None
+    username=None, team=None, access_token=None
 ):
     auth = None
     repos = []
     try:
-        if all((oauth_key, oauth_secret)):
-            from requests_oauthlib import OAuth1
+        headers = {"Authorization": "Bearer {}".format(access_token)}
 
-            auth = OAuth1(oauth_key, oauth_secret)
-        if all((username, password)):
-            auth = HTTPBasicAuth(username, password)
-        if auth is None:
-            exit("Must provide username/password or oath credentials")
         if not team or username:
-            response = requests.get("https://api.bitbucket.org/2.0/user/", auth=auth)
+            response = requests.get("https://api.bitbucket.org/2.0/user/", headers=headers)
             username = response.json().get("username")
+
         url = "https://api.bitbucket.org/2.0/repositories/{}/".format(team or username)
 
-        response = requests.get(url, auth=auth)
+        response = requests.get(url, auth=auth, headers=headers)
         response.raise_for_status()
         repos_data = response.json()
         for repo in repos_data.get("values"):
             repos.append(repo)
         while repos_data.get("next"):
-            response = requests.get(repos_data.get("next"), auth=auth)
+            response = requests.get(repos_data.get("next"), auth=auth, headers=headers)
             repos_data = response.json()
             for repo in repos_data.get("values"):
                 repos.append(repo)
@@ -157,40 +150,30 @@ def clone_repo(
     slug = repo.get("slug")
     owner = repo.get("owner").get("username") or repo.get("owner").get("nickname")
     owner_url = quote(owner)
+
     if http and not all((username, password)):
         exit("Cannot backup via http without username and password" % scm)
     slug_url = quote(slug)
     command = None
-    if scm == "hg":
-        if http:
-            command = "hg clone https://%s:%s@bitbucket.org/%s/%s" % (
-                quote(username),
-                quote(password),
-                owner_url,
-                slug_url,
-            )
-        else:
-            command = "hg clone ssh://hg@bitbucket.org/%s/%s" % (owner_url, slug_url)
-    if scm == "git":
-        git_command = "git clone"
-        if mirror:
-            git_command = "git clone --mirror"
-        if http:
-            command = "%s https://%s:%s@bitbucket.org/%s/%s.git" % (
-                git_command,
-                quote(username),
-                quote(password),
-                owner_url,
-                slug_url,
-            )
-        else:
-            command = "%s git@bitbucket.org:%s/%s.git" % (
-                git_command,
-                owner_url,
-                slug_url,
-            )
-    if not command:
-        exit("could not build command (scm [%s] not recognized?)" % scm)
+
+    git_command = "git clone"
+    if mirror:
+        git_command = "git clone --mirror"
+    if http:
+        command = "%s https://%s:%s@bitbucket.org/%s/%s.git" % (
+            git_command,
+            quote(username),
+            quote(password),
+            owner_url,
+            slug_url,
+        )
+    else:
+        command = "%s git@bitbucket.org:%s/%s.git" % (
+            git_command,
+            owner_url,
+            slug_url,
+        )
+    
     debug("Cloning %s..." % repo.get("name"))
     exec_cmd('%s "%s"' % (command, backup_dir))
     if scm == "git" and fetch_lfs:
@@ -226,16 +209,13 @@ def update_repo(repo, backup_dir, with_wiki=False, prune=False, fetch_lfs=False)
 def main():
     parser = argparse.ArgumentParser(description="Usage: %prog [options] ")
     parser.add_argument("-u", "--username", dest="username", help="Bitbucket username")
-    parser.add_argument("-p", "--password", dest="password", help="Bitbucket password")
-    parser.add_argument(
-        "-k", "--oauth-key", dest="oauth_key", help="Bitbucket oauth key"
-    )
-    parser.add_argument(
-        "-s", "--oauth-secret", dest="oauth_secret", help="Bitbucket oauth secret"
-    )
+    parser.add_argument("-p", "--password", dest="password", help="Bitbucket password used for HTTP only mode")
     parser.add_argument("-t", "--team", dest="team", help="Bitbucket team")
     parser.add_argument(
         "-l", "--location", dest="location", help="Local backup location"
+    )
+    parser.add_argument(
+        "-x", dest="access_token", help="Access token"
     )
     parser.add_argument(
         "-v",
@@ -311,8 +291,7 @@ def main():
     location = args.location
     username = args.username
     password = args.password
-    oauth_key = args.oauth_key
-    oauth_secret = args.oauth_secret
+    access_token = args.access_token
     repo_whitelist = args.repo_whitelist
     http = args.http
     max_attempts = args.attempts
@@ -328,11 +307,8 @@ def main():
         _verbose = False  # override in case both are selected
     team = args.team
 
-    if not all((oauth_key, oauth_secret)):
-        if not username:
-            username = input("Enter bitbucket username: ")
-        if not password:
-            password = getpass(prompt="Enter your bitbucket password: ")
+    if not username:
+        username = input("Enter bitbucket username: ")
     if not location:
         location = input("Enter local location to backup to: ")
     location = os.path.abspath(location)
@@ -341,10 +317,8 @@ def main():
     try:
         repos = get_repositories(
             username=username,
-            password=password,
-            oauth_key=oauth_key,
-            oauth_secret=oauth_secret,
             team=team,
+            access_token=access_token
         )
         repos = sorted(repos, key=lambda repo_: repo_.get("name"))
         dir_list = []
